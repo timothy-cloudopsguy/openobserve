@@ -186,7 +186,7 @@ Before deploying, review and update the following settings in your `properties.X
 
 1. **DNS Configuration**: Route53 records are automatically created. Ensure your `properties.X.json` file contains a valid Route53 domain that exists in your AWS account.
 2. **Database Credentials**: Automatically generated and stored in SSM Parameter Store, then securely passed to containers.
-3. **Configure Authentication**: Set up user accounts and permissions via the OpenObserve web interface.
+3. **Configure Authentication**: Set up user accounts and permissions via the OpenObserve web interface. The root/admin password will be created and stored for you in SSM params.
 4. **Test Ingestion**: Use the provided Python test scripts to verify functionality.
 
 ## Monitoring and Operations
