@@ -107,18 +107,6 @@
         "cluster_name": "nats-cluster",
         "cluster_port": 6222
     },
-    "ecs_services1": {
-        "dex": {
-            "alb_priority": 13,
-            "repository_name": "dexidp/dex",
-            "image_tag": "v2.37.0",
-            "command": ["/openobserve"],
-            "working_dir": "/",
-            "environment": {
-                "ZO_NODE_ROLE": "all"
-            }
-        }
-    },
     "ecs_services": {   
         "ingester": {
             "mount_gp3_volume": true,
