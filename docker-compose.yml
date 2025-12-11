@@ -1,0 +1,819 @@
+services:
+  nats1:
+    image: nats:2.10-alpine
+    container_name: nats1
+    ports:
+      - "4222:4222"
+      - "6222:6222"
+      - "8222:8222"
+    volumes:
+      - nats1_data:/data
+    command: >
+      --name nats1
+      --cluster nats://0.0.0.0:6222
+      --cluster_name openobserve-cluster
+      --routes=nats://nats2:6222
+      --http_port 8222
+      --js
+      --store_dir /data/jetstream
+    networks:
+      - openobserve
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats2:
+    image: nats:2.10-alpine
+    container_name: nats2
+    ports:
+      - "4223:4222"
+      - "6223:6222"
+      - "8223:8222"
+    volumes:
+      - nats2_data:/data
+    command: >
+      --name nats2
+      --cluster nats://0.0.0.0:6222
+      --cluster_name openobserve-cluster
+      --routes=nats://nats1:6222
+      --http_port 8222
+      --js
+      --store_dir /data/jetstream
+    networks:
+      - openobserve
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      nats1:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: openobserve-postgres
+    environment:
+      POSTGRES_USER: openobserve
+      POSTGRES_PASSWORD: Batman123
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - openobserve
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openobserve -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+      - ./minio-init:/docker-entrypoint-init.d
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    networks:
+      - openobserve
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_minio: http://minioadmin:minioadmin@minio:9000
+    entrypoint: sh
+    command:
+      - -c
+      - |
+        echo 'Waiting for MinIO to be ready...'
+        sleep 5
+        echo 'Creating bucket o2-dev-bucket...'
+        mc alias set minio http://minio:9000 minioadmin minioadmin
+        mc mb minio/o2-dev-bucket --ignore-existing
+        echo 'Bucket created successfully'
+    networks:
+      - openobserve
+
+  openobserve-frontend:
+    # image: o2cr.ai/openobserve/openobserve:v0.20.1-debug
+    image: 123456789012.dkr.ecr.us-east-2.amazonaws.com/openobserve/slim:v0.20.3
+    command: ["/entrypoint.sh"]
+    container_name: openobserve-frontend
+    ports:
+      - "5080:5080"
+      - "5081:5081"
+    environment:
+      # Basic configuration
+      ZO_APP_NAME: "openobserve"
+      ZO_CLUSTER_NAME: "o2"
+      ZO_NODE_ROLE: "all"
+      ZO_LOCAL_MODE: "false"
+      ZO_LOCAL_MODE_STORAGE: "disk"
+      ZO_HTTP_PORT: "5080"
+      ZO_GRPC_PORT: "5081"
+
+      # Auth configuration (same as frontend)
+      ZO_ROOT_USER_EMAIL: "root@example.com"
+      ZO_ROOT_USER_PASSWORD: "Complexpass#123"
+      ZO_ROOT_USER_TOKEN: ""
+
+      # NATS configuration
+      ZO_CLUSTER_COORDINATOR: "nats"
+      ZO_QUEUE_STORE: "nats"
+      ZO_NATS_ADDR: "nats://nats1:4222"
+      ZO_NATS_PREFIX: "o2_"
+      ZO_NATS_USER: ""
+      ZO_NATS_PASSWORD: ""
+      ZO_NATS_REPLICAS: "2"
+      ZO_NATS_CONNECT_TIMEOUT: "5"
+      ZO_NATS_COMMAND_TIMEOUT: "10"
+      ZO_NATS_V211_SUPPORT: "false"
+
+      # Postgres configuration
+      ZO_META_STORE: "postgres"
+      ZO_META_POSTGRES_DSN: "postgres://openobserve:Batman123@postgres:5432/app"
+
+      # S3/Minio configuration (using local MinIO)
+      ZO_S3_PROVIDER: "minio"
+      ZO_S3_SERVER_URL: "http://minio:9000"
+      ZO_S3_REGION_NAME: "us-east-1"
+      ZO_S3_BUCKET_NAME: "o2-dev-bucket"
+      ZO_S3_ACCESS_KEY: "minioadmin"
+      ZO_S3_SECRET_KEY: "minioadmin"
+
+      # Data directories
+      ZO_DATA_DIR: "./data/"
+      ZO_DATA_DB_DIR: ""
+      ZO_DATA_WAL_DIR: ""
+      ZO_DATA_IDX_DIR: ""
+      ZO_DATA_STREAM_DIR: ""
+      ZO_DATA_CACHE_DIR: ""
+
+      ZO_UI_ENABLED: "true"
+
+      # Feature flags
+      ZO_TELEMETRY: "false"
+      ZO_HEALTH_CHECK_ENABLED: "true"
+      ZO_PRINT_KEY_CONFIG: "false"
+      ZO_SWAGGER_ENABLED: "false"
+
+      # Timeouts and limits
+      ZO_ACTIX_REQ_TIMEOUT: "30"
+      ZO_QUERY_TIMEOUT: "600"
+      ZO_GRPC_INGEST_TIMEOUT: "600"
+      ZO_ROUTE_TIMEOUT: "600"
+      ZO_JSON_LIMIT: "209715200"
+      ZO_PAYLOAD_LIMIT: "209715200"
+
+      # Compactor specific settings
+      ZO_COMPACT_ENABLED: "true"
+      ZO_COMPACT_INTERVAL: "10"
+      ZO_COMPACT_MAX_FILE_SIZE: "512"
+
+
+      # # Basic configuration
+      # ZO_APP_NAME: "openobserve"
+      # ZO_CLUSTER_NAME: "o2"
+      # ZO_NODE_ROLE: "all"
+      # ZO_LOCAL_MODE: "false"
+      # ZO_LOCAL_MODE_STORAGE: "disk"
+      # ZO_HTTP_PORT: "5080"
+      # ZO_HTTP_ADDR: "0.0.0.0"
+      # ZO_GRPC_PORT: "5081"
+      # ZO_GRPC_ADDR: ""
+      # ZO_HTTP_IPV6_ENABLED: "false"
+      # ZO_GRPC_CONNECT_TIMEOUT: "600"
+      # ZO_GRPC_MAX_MESSAGE_SIZE: "16"
+      # ZO_GRPC_CHANNEL_CACHE_DISABLED: "false"
+      # ZO_GRPC_ORG_HEADER_KEY: "organization"
+      # ZO_GRPC_STREAM_HEADER_KEY: "stream-name"
+      # ZO_INTERNAL_GRPC_TOKEN: ""
+
+      # # Auth configuration
+      # ZO_ROOT_USER_EMAIL: "root@example.com"
+      # ZO_ROOT_USER_PASSWORD: "Complexpass#123"
+      # ZO_ROOT_USER_TOKEN: ""
+
+      # # NATS configuration
+      # ZO_CLUSTER_COORDINATOR: "nats"
+      # ZO_QUEUE_STORE: "nats"
+      # ZO_NATS_ADDR: "nats://nats1:4222"
+      # ZO_NATS_PREFIX: "o2_"
+      # ZO_NATS_USER: ""
+      # ZO_NATS_PASSWORD: ""
+      # ZO_NATS_REPLICAS: "2"
+      # ZO_NATS_CONNECT_TIMEOUT: "5"
+      # ZO_NATS_COMMAND_TIMEOUT: "10"
+      # ZO_NATS_V211_SUPPORT: "false"
+      # ZO_NATS_QUEUE_MAX_AGE: "60"
+      # ZO_NATS_QUEUE_MAX_SIZE: "2048"
+      # ZO_NATS_KV_WATCH_MODULES: ""
+      # ZO_NATS_EVENT_STORAGE: "file"
+      # ZO_NATS_LOCK_WAIT_TIMEOUT: "600"
+
+      # # Postgres configuration
+      # ZO_META_STORE: "postgres"
+      # ZO_META_POSTGRES_DSN: "postgres://openobserve:Batman123@postgres:5432/app"
+
+      # # S3/Minio configuration (using local MinIO)
+      # ZO_S3_PROVIDER: "minio"
+      # ZO_S3_SERVER_URL: "http://minio:9000"
+      # ZO_S3_REGION_NAME: "us-east-1"
+      # ZO_S3_BUCKET_NAME: "o2-dev-bucket"
+      # ZO_S3_ACCESS_KEY: "minioadmin"
+      # ZO_S3_SECRET_KEY: "minioadmin"
+
+      # # Data directories
+      # ZO_DATA_DIR: "./data/"
+      # ZO_DATA_DB_DIR: ""
+      # ZO_DATA_WAL_DIR: ""
+      # ZO_DATA_IDX_DIR: ""
+      # ZO_DATA_STREAM_DIR: ""
+      # ZO_DATA_CACHE_DIR: ""
+
+      # # UI configuration
+      # ZO_UI_ENABLED: "true"
+      # ZO_UI_SQL_BASE64_ENABLED: "false"
+      # ZO_WEB_URL: "http://localhost:5080"
+      # ZO_BASE_URI: ""
+
+      # # Feature flags
+      # ZO_TELEMETRY: "false"
+      # ZO_PRINT_KEY_CONFIG: "false"
+      # ZO_SWAGGER_ENABLED: "true"
+
+      # # Timeouts and limits
+      # ZO_ACTIX_REQ_TIMEOUT: "30"
+      # ZO_QUERY_TIMEOUT: "600"
+      # ZO_GRPC_INGEST_TIMEOUT: "600"
+      # ZO_ROUTE_TIMEOUT: "600"
+      # ZO_JSON_LIMIT: "209715200"
+      # ZO_PAYLOAD_LIMIT: "209715200"
+
+      # # Usage reporting (needed for pre stop hook)
+      # ZO_USAGE_REPORTING_ENABLED: "false"
+      # ZO_USAGE_REPORTING_MODE: "local"
+      # ZO_USAGE_REPORTING_CREDS: ""
+      # ZO_USAGE_REPORTING_THREAD_NUM: "0"
+      # ZO_USAGE_ORG: "_meta"
+      # ZO_USAGE_BATCH_SIZE: "2000"
+      # ZO_USAGE_PUBLISH_INTERVAL: "60" 
+
+      # ZO_HEALTH_CHECK_ENABLED: "true"
+      # ZO_HEALTH_CHECK_TIMEOUT: "5"
+      # ZO_HEALTH_CHECK_FAILED_TIMES: "3"
+      # ZO_META_CONNECTION_POOL_MIN_SIZE: "0"
+      # ZO_META_CONNECTION_POOL_MAX_SIZE: "0"
+      # ZO_META_TRANSACTION_RETRIES: "3"
+      # ZO_META_TRANSACTION_LOCK_TIMEOUT: "600"
+      # ZO_COLS_PER_RECORD_LIMIT: "200"
+      
+      # ZO_FEATURE_FULLTEXT_EXTRA_FIELDS: ""
+      # ZO_FEATURE_INDEX_EXTRA_FIELDS: ""
+      # ZO_FEATURE_DISTINCT_EXTRA_FIELDS: ""
+      # ZO_FEATURE_QUERY_QUEUE_ENABLED: "true"
+      # ZO_FEATURE_QUICK_MODE_FIELDS: ""
+      # ZO_FEATURE_QUERY_PARTITION_STRATEGY: "file_hash"
+      # ZO_FEATURE_SHARED_MEMTABLE_ENABLED: "false"
+      # ZO_FEATURE_QUERY_STREAMING_AGGS: "true"
+      
+      # ZO_DATAFUSION_STREAMING_AGGS_CACHE_MAX_ENTRIES: "10000"
+      # ZO_DATAFUSION_FILE_STAT_CACHE_MAX_ENTRIES: "10000"
+      # ZO_RESULT_CACHE_ENABLED: "true"
+      # ZO_USE_MULTIPLE_RESULT_CACHE: "true"
+      # ZO_RESULT_CACHE_SELECTION_STRATEGY: "overlap"
+      # ZO_CACHE_DELAY_SECS: "300"
+      # ZO_DISK_RESULT_CACHE_MAX_SIZE: "0"
+      # ZO_METRICS_CACHE_ENABLED: "true"
+      # ZO_METRICS_CACHE_MAX_ENTRIES: "10000"
+      # ZO_CONSISTENT_HASH_VNODES: "1000"
+      # ZO_QUERY_OPTIMIZATION_NUM_FIELDS: "0"
+      # ZO_SCHEMA_MAX_FIELDS_TO_ENABLE_UDS: "500"
+      # ZO_USER_DEFINED_SCHEMA_MAX_FIELDS: "600"
+      # ZO_QUICK_MODE_ENABLED: "false"   
+      # ZO_QUICK_MODE_FORCE_ENABLED: "true"
+      # ZO_QUICK_MODE_NUM_FIELDS: "500"
+      # ZO_QUICK_MODE_STRATEGY: ""
+      # ZO_BLOOM_FILTER_ENABLED: "true"
+      # ZO_BLOOM_FILTER_DEFAULT_FIELDS: ""
+      # ZO_ENABLE_INVERTED_INDEX: "true"
+      # ZO_FEATURE_QUERY_REMOVE_FILTER_WITH_INDEX: "true"
+      # ZO_INVERTED_INDEX_COUNT_OPTIMIZER_ENABLED: "true"
+      # ZO_INVERTED_INDEX_CAMEL_CASE_TOKENIZER_DISABLED: "false"
+      # ZO_QUERY_ON_STREAM_SELECTION: "true"
+      # ZO_DISTINCT_VALUES_INTERVAL: "10"
+      # ZO_DISTINCT_VALUES_HOURLY: "false"
+      # ZO_TRACING_SEARCH_ENABLED: "false"
+      # ZO_TRACING_HEADER_KEY: "Authorization"
+      # ZO_TELEMETRY_HEARTBEAT: "1800"
+      # ZO_TELEMETRY_URL: "https://e1.zinclabs.dev"
+      # ZO_PARQUET_MAX_ROW_GROUP_SIZE: "0"
+      # ZO_MAX_FILE_SIZE_ON_DISK: "128"
+      # ZO_MAX_FILE_SIZE_IN_MEMORY: "128"
+      # ZO_MAX_FILE_RETENTION_TIME: "60"
+      # ZO_FILE_PUSH_INTERVAL: "10"
+      # ZO_FILE_PUSH_LIMIT: "10000"
+      # ZO_FILE_MOVE_FIELDS_LIMIT: "2000"
+      # ZO_FILE_MOVE_THREAD_NUM: "0"
+      # ZO_FILE_MERGE_THREAD_NUM: "0"
+      # ZO_MEM_DUMP_THREAD_NUM: "0"
+      # ZO_MEM_TABLE_MAX_SIZE: "0"
+      # ZO_MEM_TABLE_BUCKET_NUM: "0"
+      # ZO_MEM_PERSIST_INTERVAL: "2"
+      # ZO_ENRICHMENT_TABLE_LIMIT: "10"
+      # ZO_WAL_WRITE_BUFFER_SIZE: "16384"
+      # ZO_WAL_FSYNC_DISABLED: "false"       
+      # ZO_WAL_WRITE_QUEUE_ENABLED: "false"
+      # ZO_QUERY_THREAD_NUM: "0"
+      # ZO_QUERY_INDEX_THREAD_NUM: "0"
+      # ZO_QUERY_INGESTER_TIMEOUT: "0"
+      # ZO_QUERY_DEFAULT_LIMIT: "1000"
+      # ZO_ROUTE_MAX_CONNECTIONS: "1024"
+      # ZO_ROUTE_STRATEGY: "workload"
+      # ZO_HTTP_WORKER_NUM: "0"
+      # ZO_HTTP_WORKER_MAX_BLOCKING: "0"
+      # ZO_HTTP_ACCESS_LOG_FORMAT: ""
+      # ZO_ACTIX_KEEP_ALIVE": "30"
+      # ZO_ACTIX_SHUTDOWN_TIMEOUT: "10"
+      # ZO_ACTIX_SLOW_LOG_THRESHOLD": "5"
+      # ZO_INGEST_ALLOWED_UPTO: "24"
+      # ZO_COMPACT_ENABLED: "true"
+      # ZO_COMPACT_INTERVAL: "10"
+      # ZO_COMPACT_SYNC_TO_DB_INTERVAL: "600"
+      # ZO_COMPACT_STRATEGY: "file_time"
+      # ZO_COMPACT_MAX_FILE_SIZE: "512"
+      # ZO_COMPACT_DATA_RETENTION_DAYS: "3650"
+      # ZO_COMPACT_DELETE_FILES_DELAY_HOURS: "2"
+      # ZO_COMPACT_BATCH_SIZE: "0"
+      # ZO_COMPACT_BLOCKED_ORGS: ""
+      # ZO_MEMORY_CACHE_ENABLED: "false"
+      # ZO_MEMORY_CACHE_STRATEGY: "lru" 
+      # ZO_MEMORY_CACHE_MAX_SIZE: "0"
+      # ZO_MEMORY_CACHE_SKIP_SIZE: "0"
+      # ZO_MEMORY_CACHE_RELEASE_SIZE: "0"
+      # ZO_MEMORY_CACHE_GC_SIZE: "50"
+      # ZO_MEMORY_CACHE_GC_INTERVAL: "0"
+      # ZO_MEMORY_CACHE_DATAFUSION_MEMORY_POOL: ""
+      # ZO_MEMORY_CACHE_DATAFUSION_MAX_SIZE: "0"
+      # ZO_DISK_CACHE_ENABLED: "true"
+      # ZO_DISK_CACHE_STRATEGY: "lru" 
+      # ZO_DISK_CACHE_MAX_SIZE: "0"
+      # ZO_DISK_CACHE_SKIP_SIZE: "0"
+      # ZO_DISK_CACHE_RELEASE_SIZE: "0"
+      # ZO_DISK_CACHE_GC_SIZE: "100"
+      # ZO_DISK_CACHE_GC_INTERVAL: "0"
+      # ZO_CACHE_LATEST_FILES_ENABLED: "false"
+      # ZO_CACHE_LATEST_FILES_PARQUET: "true"
+      # ZO_CACHE_LATEST_FILES_INDEX: "true"
+      # ZO_CACHE_LATEST_FILES_DELETE_MERGE_FILES: "false"
+      # ZO_CACHE_LATEST_FILES_DOWNLOAD_FROM_NODE: "false"
+      # ZO_S3_BUCKET_PREFIX: ""
+      # ZO_S3_FEATURE_FORCE_HOSTED_STYLE: "false"
+      # ZO_S3_FEATURE_HTTP1_ONLY: "false"
+      # ZO_S3_FEATURE_HTTP2_ONLY: "false"
+      # ZO_S3_SYNC_TO_CACHE_INTERVAL: "60"
+      # ZO_S3_CONNECT_TIMEOUT: "10" 
+      # ZO_S3_REQUEST_TIMEOUT: "3600" 
+      # ZO_S3_ALLOW_INVALID_CERTIFICATES: "false"
+      # ZO_S3_MAX_RETRIES: "10"
+      # ZO_S3_MAX_IDLE_PER_HOST: "0"
+      # ZO_S3_CONNECTION_KEEPALIVE_TIMEOUT: "20"
+      # ZO_PRINT_KEY_EVENT: "false"
+      # ZO_PRINT_KEY_SQL: "false"
+      # ZO_IGNORE_FILE_RETENTION_BY_STREAM: "false"
+      # ZO_RUM_ENABLED: "false"
+      # ZO_RUM_APPLICATION_ID: ""
+      # ZO_RUM_SITE: ""
+      # ZO_RUM_SERVICE: ""
+      # ZO_RUM_ENV: ""
+      # ZO_RUM_VERSION: "0.9.1"
+      # ZO_RUM_ORGANIZATION_IDENTIFIER: "default"
+      # ZO_RUM_API_VERSION: "v1"
+      # ZO_RUM_INSECURE_HTTP: "false"
+      # ZO_COOKIE_MAX_AGE: "2592000" 
+      # ZO_QUERY_GROUP_BASE_SPEED: "768" 
+      # ZO_QUERY_PARTITION_BY_SECS: "1" 
+      # ZO_QUERY_PARTITION_MIN_SECS: "600" 
+      # ZO_SHOW_STREAM_DATES_DOCS_NUM: "true" 
+      # ZO_INGEST_BLOCKED_STREAMS: "" 
+      # ZO_INGEST_INFER_SCHEMA_PER_REQUEST: "true"
+      # ZO_REPORT_SERVER_HTTP_PORT: "5082"
+      # ZO_CHROME_SLEEP_SECS: "50"
+      # ZO_CHROME_NO_SANDBOX: "true"
+      # ZO_SMTP_ENABLED: "false" 
+      # ZO_BULK_RESPONSE_INCLUDE_ERRORS_ONLY: "false"
+      # ZO_ALLOW_USER_DEFINED_SCHEMAS: "true"
+      # ZO_SKIP_FORMAT_STREAM_NAME: "false"
+      # ZO_MEM_TABLE_STREAMS: "" 
+      # ZO_DEFAULT_SCRAPE_INTERVAL: "15"
+      # ZO_MEMORY_CIRCUIT_BREAKER_ENABLED: "false"
+      # ZO_MEMORY_CIRCUIT_BREAKER_RATIO: "90"
+      # ZO_MMDB_DISABLE_DOWNLOAD: "false"
+      # ZO_REPORT_SERVER_SKIP_TLS_VERIFY: "false"
+      # ZO_SELF_METRIC_CONSUMPTION_ENABLED: "false" 
+      # ZO_SELF_METRIC_CONSUMPTION_INTERVAL: "60" 
+      # ZO_SELF_METRIC_CONSUMPTION_ACCEPTLIST": "" 
+      # ZO_STREAMING_ENABLED: "true"
+      # ZO_MIN_AUTO_REFRESH_INTERVAL: "5"
+      # ZO_MAX_DASHBOARD_SERIES: "100"
+      # ZO_PROMETHEUS_ENABLED: "false"
+      # ZO_HISTOGRAM_ENABLED: "true" 
+      # ZO_SGRAPH_ENABLED: "true"
+      # RUST_LOG: "info"
+      # RUST_BACKTRACE: "0"             
+
+
+    volumes:
+      - frontend_data:/data
+    networks:
+      - openobserve
+    depends_on:
+      nats1:
+        condition: service_healthy
+      nats2:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  openobserve-ingester:
+    # image: o2cr.ai/openobserve/openobserve:v0.20.1
+    image: 123456789012.dkr.ecr.us-east-2.amazonaws.com/openobserve/slim:v0.20.3
+    container_name: openobserve-ingester
+    command: ["/entrypoint.sh"]
+    ports:
+      - "5082:5080"
+      - "5083:5081"
+    environment:
+      # Basic configuration
+      ZO_APP_NAME: "openobserve"
+      ZO_CLUSTER_NAME: "o2"
+      ZO_NODE_ROLE: "ingester,querier,compactor"
+      ZO_LOCAL_MODE: "false"
+      ZO_LOCAL_MODE_STORAGE: "disk"
+      ZO_HTTP_PORT: "5080"
+      ZO_GRPC_PORT: "5081"
+
+      # Auth configuration (same as frontend)
+      ZO_ROOT_USER_EMAIL: "root@example.com"
+      ZO_ROOT_USER_PASSWORD: "Complexpass#123"
+      ZO_ROOT_USER_TOKEN: ""
+
+      # NATS configuration
+      ZO_CLUSTER_COORDINATOR: "nats"
+      ZO_QUEUE_STORE: "nats"
+      ZO_NATS_ADDR: "nats://nats1:4222"
+      ZO_NATS_PREFIX: "o2_"
+      ZO_NATS_USER: ""
+      ZO_NATS_PASSWORD: ""
+      ZO_NATS_REPLICAS: "2"
+      ZO_NATS_CONNECT_TIMEOUT: "5"
+      ZO_NATS_COMMAND_TIMEOUT: "10"
+      ZO_NATS_V211_SUPPORT: "false"
+
+      # Postgres configuration
+      ZO_META_STORE: "postgres"
+      ZO_META_POSTGRES_DSN: "postgres://openobserve:Batman123@postgres:5432/app"
+
+      # S3/Minio configuration (using local MinIO)
+      ZO_S3_PROVIDER: "minio"
+      ZO_S3_SERVER_URL: "http://minio:9000"
+      ZO_S3_REGION_NAME: "us-east-1"
+      ZO_S3_BUCKET_NAME: "o2-dev-bucket"
+      ZO_S3_ACCESS_KEY: "minioadmin"
+      ZO_S3_SECRET_KEY: "minioadmin"
+
+      # Data directories
+      ZO_DATA_DIR: "./data/"
+      ZO_DATA_DB_DIR: ""
+      ZO_DATA_WAL_DIR: ""
+      ZO_DATA_IDX_DIR: ""
+      ZO_DATA_STREAM_DIR: ""
+      ZO_DATA_CACHE_DIR: ""
+
+      ZO_UI_ENABLED: "true"
+
+      # Feature flags
+      ZO_TELEMETRY: "false"
+      ZO_HEALTH_CHECK_ENABLED: "true"
+      ZO_PRINT_KEY_CONFIG: "false"
+      ZO_SWAGGER_ENABLED: "false"
+
+      # Timeouts and limits
+      ZO_ACTIX_REQ_TIMEOUT: "30"
+      ZO_QUERY_TIMEOUT: "600"
+      ZO_GRPC_INGEST_TIMEOUT: "600"
+      ZO_ROUTE_TIMEOUT: "600"
+      ZO_JSON_LIMIT: "209715200"
+      ZO_PAYLOAD_LIMIT: "209715200"
+
+      # Compactor specific settings
+      ZO_COMPACT_ENABLED: "true"
+      ZO_COMPACT_INTERVAL: "10"
+      ZO_COMPACT_MAX_FILE_SIZE: "512"
+
+      # # Basic configuration
+      # ZO_APP_NAME: "openobserve"
+      # ZO_CLUSTER_NAME: "o2"
+      # ZO_NODE_ROLE: "ingester,querier,compactor"
+      # ZO_LOCAL_MODE: "false"
+      # ZO_LOCAL_MODE_STORAGE: "disk"
+      # ZO_HTTP_PORT: "5080"
+      # ZO_HTTP_ADDR: "0.0.0.0"
+      # ZO_GRPC_PORT: "5081"
+      # ZO_GRPC_ADDR: ""
+      # ZO_HTTP_IPV6_ENABLED: "false"
+      # ZO_GRPC_CONNECT_TIMEOUT: "600"
+      # ZO_GRPC_MAX_MESSAGE_SIZE: "16"
+      # ZO_GRPC_CHANNEL_CACHE_DISABLED: "false"
+      # ZO_GRPC_ORG_HEADER_KEY: "organization"
+      # ZO_GRPC_STREAM_HEADER_KEY: "stream-name"
+      # ZO_INTERNAL_GRPC_TOKEN: ""
+
+      # # Auth configuration
+      # ZO_ROOT_USER_EMAIL: "root@example.com"
+      # ZO_ROOT_USER_PASSWORD: "Complexpass#123"
+      # ZO_ROOT_USER_TOKEN: ""
+
+      # # NATS configuration
+      # ZO_CLUSTER_COORDINATOR: "nats"
+      # ZO_QUEUE_STORE: "nats"
+      # ZO_NATS_ADDR: "nats://nats1:4222"
+      # ZO_NATS_PREFIX: "o2_"
+      # ZO_NATS_USER: ""
+      # ZO_NATS_PASSWORD: ""
+      # ZO_NATS_REPLICAS: "2"
+      # ZO_NATS_CONNECT_TIMEOUT: "5"
+      # ZO_NATS_COMMAND_TIMEOUT: "10"
+      # ZO_NATS_V211_SUPPORT: "false"
+      # ZO_NATS_QUEUE_MAX_AGE: "60"
+      # ZO_NATS_QUEUE_MAX_SIZE: "2048"
+      # ZO_NATS_KV_WATCH_MODULES: ""
+      # ZO_NATS_EVENT_STORAGE: "file"
+      # ZO_NATS_LOCK_WAIT_TIMEOUT: "600"
+
+      # # Postgres configuration
+      # ZO_META_STORE: "postgres"
+      # ZO_META_POSTGRES_DSN: "postgres://openobserve:Batman123@postgres:5432/app"
+
+      # # S3/Minio configuration (using local MinIO)
+      # ZO_S3_PROVIDER: "minio"
+      # ZO_S3_SERVER_URL: "http://minio:9000"
+      # ZO_S3_REGION_NAME: "us-east-1"
+      # ZO_S3_BUCKET_NAME: "o2-dev-bucket"
+      # ZO_S3_ACCESS_KEY: "minioadmin"
+      # ZO_S3_SECRET_KEY: "minioadmin"
+
+      # # Data directories
+      # ZO_DATA_DIR: "./data/"
+      # ZO_DATA_DB_DIR: ""
+      # ZO_DATA_WAL_DIR: ""
+      # ZO_DATA_IDX_DIR: ""
+      # ZO_DATA_STREAM_DIR: ""
+      # ZO_DATA_CACHE_DIR: ""
+
+      # # UI configuration
+      # ZO_UI_ENABLED: "true"
+      # ZO_UI_SQL_BASE64_ENABLED: "false"
+      # ZO_WEB_URL: "http://localhost:5080"
+      # ZO_BASE_URI: ""
+
+      # # Feature flags
+      # ZO_TELEMETRY: "false"
+      # ZO_PRINT_KEY_CONFIG: "false"
+      # ZO_SWAGGER_ENABLED: "true"
+
+      # # Timeouts and limits
+      # ZO_ACTIX_REQ_TIMEOUT: "30"
+      # ZO_QUERY_TIMEOUT: "600"
+      # ZO_GRPC_INGEST_TIMEOUT: "600"
+      # ZO_ROUTE_TIMEOUT: "600"
+      # ZO_JSON_LIMIT: "209715200"
+      # ZO_PAYLOAD_LIMIT: "209715200"
+
+      # # Usage reporting (needed for pre stop hook)
+      # ZO_USAGE_REPORTING_ENABLED: "false"
+      # ZO_USAGE_REPORTING_MODE: "local"
+      # ZO_USAGE_REPORTING_CREDS: ""
+      # ZO_USAGE_REPORTING_THREAD_NUM: "0"
+      # ZO_USAGE_ORG: "_meta"
+      # ZO_USAGE_BATCH_SIZE: "2000"
+      # ZO_USAGE_PUBLISH_INTERVAL: "60" 
+
+      # ZO_HEALTH_CHECK_ENABLED: "true"
+      # ZO_HEALTH_CHECK_TIMEOUT: "5"
+      # ZO_HEALTH_CHECK_FAILED_TIMES: "3"
+      # ZO_META_CONNECTION_POOL_MIN_SIZE: "0"
+      # ZO_META_CONNECTION_POOL_MAX_SIZE: "0"
+      # ZO_META_TRANSACTION_RETRIES: "3"
+      # ZO_META_TRANSACTION_LOCK_TIMEOUT: "600"
+      # ZO_COLS_PER_RECORD_LIMIT: "200"
+      
+      # ZO_FEATURE_FULLTEXT_EXTRA_FIELDS: ""
+      # ZO_FEATURE_INDEX_EXTRA_FIELDS: ""
+      # ZO_FEATURE_DISTINCT_EXTRA_FIELDS: ""
+      # ZO_FEATURE_QUERY_QUEUE_ENABLED: "true"
+      # ZO_FEATURE_QUICK_MODE_FIELDS: ""
+      # ZO_FEATURE_QUERY_PARTITION_STRATEGY: "file_hash"
+      # ZO_FEATURE_SHARED_MEMTABLE_ENABLED: "false"
+      # ZO_FEATURE_QUERY_STREAMING_AGGS: "true"
+      
+      # ZO_DATAFUSION_STREAMING_AGGS_CACHE_MAX_ENTRIES: "10000"
+      # ZO_DATAFUSION_FILE_STAT_CACHE_MAX_ENTRIES: "10000"
+      # ZO_RESULT_CACHE_ENABLED: "true"
+      # ZO_USE_MULTIPLE_RESULT_CACHE: "true"
+      # ZO_RESULT_CACHE_SELECTION_STRATEGY: "overlap"
+      # ZO_CACHE_DELAY_SECS: "300"
+      # ZO_DISK_RESULT_CACHE_MAX_SIZE: "0"
+      # ZO_METRICS_CACHE_ENABLED: "true"
+      # ZO_METRICS_CACHE_MAX_ENTRIES: "10000"
+      # ZO_CONSISTENT_HASH_VNODES: "1000"
+      # ZO_QUERY_OPTIMIZATION_NUM_FIELDS: "0"
+      # ZO_SCHEMA_MAX_FIELDS_TO_ENABLE_UDS: "500"
+      # ZO_USER_DEFINED_SCHEMA_MAX_FIELDS: "600"
+      # ZO_QUICK_MODE_ENABLED: "false"   
+      # ZO_QUICK_MODE_FORCE_ENABLED: "true"
+      # ZO_QUICK_MODE_NUM_FIELDS: "500"
+      # ZO_QUICK_MODE_STRATEGY: ""
+      # ZO_BLOOM_FILTER_ENABLED: "true"
+      # ZO_BLOOM_FILTER_DEFAULT_FIELDS: ""
+      # ZO_ENABLE_INVERTED_INDEX: "true"
+      # ZO_FEATURE_QUERY_REMOVE_FILTER_WITH_INDEX: "true"
+      # ZO_INVERTED_INDEX_COUNT_OPTIMIZER_ENABLED: "true"
+      # ZO_INVERTED_INDEX_CAMEL_CASE_TOKENIZER_DISABLED: "false"
+      # ZO_QUERY_ON_STREAM_SELECTION: "true"
+      # ZO_DISTINCT_VALUES_INTERVAL: "10"
+      # ZO_DISTINCT_VALUES_HOURLY: "false"
+      # ZO_TRACING_SEARCH_ENABLED: "false"
+      # ZO_TRACING_HEADER_KEY: "Authorization"
+      # ZO_TELEMETRY_HEARTBEAT: "1800"
+      # ZO_TELEMETRY_URL: "https://e1.zinclabs.dev"
+      # ZO_PARQUET_MAX_ROW_GROUP_SIZE: "0"
+      # ZO_MAX_FILE_SIZE_ON_DISK: "128"
+      # ZO_MAX_FILE_SIZE_IN_MEMORY: "128"
+      # ZO_MAX_FILE_RETENTION_TIME: "60"
+      # ZO_FILE_PUSH_INTERVAL: "10"
+      # ZO_FILE_PUSH_LIMIT: "10000"
+      # ZO_FILE_MOVE_FIELDS_LIMIT: "2000"
+      # ZO_FILE_MOVE_THREAD_NUM: "0"
+      # ZO_FILE_MERGE_THREAD_NUM: "0"
+      # ZO_MEM_DUMP_THREAD_NUM: "0"
+      # ZO_MEM_TABLE_MAX_SIZE: "0"
+      # ZO_MEM_TABLE_BUCKET_NUM: "0"
+      # ZO_MEM_PERSIST_INTERVAL: "2"
+      # ZO_ENRICHMENT_TABLE_LIMIT: "10"
+      # ZO_WAL_WRITE_BUFFER_SIZE: "16384"
+      # ZO_WAL_FSYNC_DISABLED: "false"       
+      # ZO_WAL_WRITE_QUEUE_ENABLED: "false"
+      # ZO_QUERY_THREAD_NUM: "0"
+      # ZO_QUERY_INDEX_THREAD_NUM: "0"
+      # ZO_QUERY_INGESTER_TIMEOUT: "0"
+      # ZO_QUERY_DEFAULT_LIMIT: "1000"
+      # ZO_ROUTE_MAX_CONNECTIONS: "1024"
+      # ZO_ROUTE_STRATEGY: "workload"
+      # ZO_HTTP_WORKER_NUM: "0"
+      # ZO_HTTP_WORKER_MAX_BLOCKING: "0"
+      # ZO_HTTP_ACCESS_LOG_FORMAT: ""
+      # ZO_ACTIX_KEEP_ALIVE": "30"
+      # ZO_ACTIX_SHUTDOWN_TIMEOUT: "10"
+      # ZO_ACTIX_SLOW_LOG_THRESHOLD": "5"
+      # ZO_INGEST_ALLOWED_UPTO: "24"
+      # ZO_COMPACT_ENABLED: "true"
+      # ZO_COMPACT_INTERVAL: "10"
+      # ZO_COMPACT_SYNC_TO_DB_INTERVAL: "600"
+      # ZO_COMPACT_STRATEGY: "file_time"
+      # ZO_COMPACT_MAX_FILE_SIZE: "512"
+      # ZO_COMPACT_DATA_RETENTION_DAYS: "3650"
+      # ZO_COMPACT_DELETE_FILES_DELAY_HOURS: "2"
+      # ZO_COMPACT_BATCH_SIZE: "0"
+      # ZO_COMPACT_BLOCKED_ORGS: ""
+      # ZO_MEMORY_CACHE_ENABLED: "false"
+      # ZO_MEMORY_CACHE_STRATEGY: "lru" 
+      # ZO_MEMORY_CACHE_MAX_SIZE: "0"
+      # ZO_MEMORY_CACHE_SKIP_SIZE: "0"
+      # ZO_MEMORY_CACHE_RELEASE_SIZE: "0"
+      # ZO_MEMORY_CACHE_GC_SIZE: "50"
+      # ZO_MEMORY_CACHE_GC_INTERVAL: "0"
+      # ZO_MEMORY_CACHE_DATAFUSION_MEMORY_POOL: ""
+      # ZO_MEMORY_CACHE_DATAFUSION_MAX_SIZE: "0"
+      # ZO_DISK_CACHE_ENABLED: "true"
+      # ZO_DISK_CACHE_STRATEGY: "lru" 
+      # ZO_DISK_CACHE_MAX_SIZE: "0"
+      # ZO_DISK_CACHE_SKIP_SIZE: "0"
+      # ZO_DISK_CACHE_RELEASE_SIZE: "0"
+      # ZO_DISK_CACHE_GC_SIZE: "100"
+      # ZO_DISK_CACHE_GC_INTERVAL: "0"
+      # ZO_CACHE_LATEST_FILES_ENABLED: "false"
+      # ZO_CACHE_LATEST_FILES_PARQUET: "true"
+      # ZO_CACHE_LATEST_FILES_INDEX: "true"
+      # ZO_CACHE_LATEST_FILES_DELETE_MERGE_FILES: "false"
+      # ZO_CACHE_LATEST_FILES_DOWNLOAD_FROM_NODE: "false"
+      # ZO_S3_BUCKET_PREFIX: ""
+      # ZO_S3_FEATURE_FORCE_HOSTED_STYLE: "false"
+      # ZO_S3_FEATURE_HTTP1_ONLY: "false"
+      # ZO_S3_FEATURE_HTTP2_ONLY: "false"
+      # ZO_S3_SYNC_TO_CACHE_INTERVAL: "60"
+      # ZO_S3_CONNECT_TIMEOUT: "10" 
+      # ZO_S3_REQUEST_TIMEOUT: "3600" 
+      # ZO_S3_ALLOW_INVALID_CERTIFICATES: "false"
+      # ZO_S3_MAX_RETRIES: "10"
+      # ZO_S3_MAX_IDLE_PER_HOST: "0"
+      # ZO_S3_CONNECTION_KEEPALIVE_TIMEOUT: "20"
+      # ZO_PRINT_KEY_EVENT: "false"
+      # ZO_PRINT_KEY_SQL: "false"
+      # ZO_IGNORE_FILE_RETENTION_BY_STREAM: "false"
+      # ZO_RUM_ENABLED: "false"
+      # ZO_RUM_APPLICATION_ID: ""
+      # ZO_RUM_SITE: ""
+      # ZO_RUM_SERVICE: ""
+      # ZO_RUM_ENV: ""
+      # ZO_RUM_VERSION: "0.9.1"
+      # ZO_RUM_ORGANIZATION_IDENTIFIER: "default"
+      # ZO_RUM_API_VERSION: "v1"
+      # ZO_RUM_INSECURE_HTTP: "false"
+      # ZO_COOKIE_MAX_AGE: "2592000" 
+      # ZO_QUERY_GROUP_BASE_SPEED: "768" 
+      # ZO_QUERY_PARTITION_BY_SECS: "1" 
+      # ZO_QUERY_PARTITION_MIN_SECS: "600" 
+      # ZO_SHOW_STREAM_DATES_DOCS_NUM: "true" 
+      # ZO_INGEST_BLOCKED_STREAMS: "" 
+      # ZO_INGEST_INFER_SCHEMA_PER_REQUEST: "true"
+      # ZO_REPORT_SERVER_HTTP_PORT: "5082"
+      # ZO_CHROME_SLEEP_SECS: "50"
+      # ZO_CHROME_NO_SANDBOX: "true"
+      # ZO_SMTP_ENABLED: "false" 
+      # ZO_BULK_RESPONSE_INCLUDE_ERRORS_ONLY: "false"
+      # ZO_ALLOW_USER_DEFINED_SCHEMAS: "true"
+      # ZO_SKIP_FORMAT_STREAM_NAME: "false"
+      # ZO_MEM_TABLE_STREAMS: "" 
+      # ZO_DEFAULT_SCRAPE_INTERVAL: "15"
+      # ZO_MEMORY_CIRCUIT_BREAKER_ENABLED: "false"
+      # ZO_MEMORY_CIRCUIT_BREAKER_RATIO: "90"
+      # ZO_MMDB_DISABLE_DOWNLOAD: "false"
+      # ZO_REPORT_SERVER_SKIP_TLS_VERIFY: "false"
+      # ZO_SELF_METRIC_CONSUMPTION_ENABLED: "false" 
+      # ZO_SELF_METRIC_CONSUMPTION_INTERVAL: "60" 
+      # ZO_SELF_METRIC_CONSUMPTION_ACCEPTLIST": "" 
+      # ZO_STREAMING_ENABLED: "true"
+      # ZO_MIN_AUTO_REFRESH_INTERVAL: "5"
+      # ZO_MAX_DASHBOARD_SERIES: "100"
+      # ZO_PROMETHEUS_ENABLED: "false"
+      # ZO_HISTOGRAM_ENABLED: "true" 
+      # ZO_SGRAPH_ENABLED: "true"
+      # RUST_LOG: "info"
+      # RUST_BACKTRACE: "0"             
+    volumes:
+      - ingester_data:/data
+    networks:
+      - openobserve
+    depends_on:
+      nats1:
+        condition: service_healthy
+      nats2:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  openobserve:
+    driver: bridge
+
+volumes:
+  nats1_data:
+  nats2_data:
+  postgres_data:
+  frontend_data:
+  ingester_data:
+  minio_data:
