@@ -45,6 +45,17 @@ The stack deploys multiple OpenObserve services as ECS tasks:
   - Since it's Role is All, it can ingest, but isn't behind the ALB
 - **Features**: Full OpenObserve web interface with dashboards and alerts
 
+### Enterprise-Grade Deployment: Role Separation
+For production environments requiring granular scaling and high availability, you can break out all OpenObserve roles into separate ECS services, each with independent scaling policies:
+
+**Benefits of Role Separation:**
+- **Independent Scaling**: Each role can scale based on its specific workload patterns
+- **Resource Optimization**: Allocate appropriate compute resources per role
+- **Fault Isolation**: Issues in one role don't affect others
+- **Cost Efficiency**: Scale only the components experiencing load
+
+To implement role separation, create individual ECS services in `properties.dev.json` with dedicated `ZO_NODE_ROLE` values and custom scaling configurations for each role.
+
 #### Additional Services
 - **NATS Cluster**: 2-node NATS cluster for distributed coordination
 - **Database Service Accounts**: Automated creation of PostgreSQL users with specific permissions
